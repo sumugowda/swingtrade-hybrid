@@ -49,53 +49,34 @@ def write_journal_rows(rows):
 
 # ---------------- DATA LOADER ----------------
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_history(symbols, start="2015-01-01"):
-    """Fetch OHLCV from Yahoo; fall back to Alpha Vantage if Yahoo fails."""
+
+@st.cache_data(show_spinner=False)
+def load_history_local(folder="data"):
     frames = []
-    alpha_key = st.secrets["alphavantage"]["api_key"]
-
-    for s in symbols:
-        y = f"{s}.NS"
-        st.write(f"Fetching {y}")
-        try:
-            df = yf.download(y, start=start, progress=False, auto_adjust=False)
-            if not df.empty:
-                df = df.rename(columns=str.lower).reset_index()
-                df["symbol"] = s
-                frames.append(df[["date","symbol","open","high","low","close","volume"]])
-                continue  # Yahoo worked
-        except Exception:
-            pass
-
-        # Yahoo failed — try Alpha Vantage (daily adjusted)
-        st.write(f"Yahoo failed for {s}, trying Alpha Vantage…")
-        try:
-            url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={s}.BSE&apikey={alpha_key}&outputsize=compact"
-            r = requests.get(url, timeout=15)
-            js = r.json().get("Time Series (Daily)", {})
-            if not js:
-                continue
-            rows = []
-            for date_str, vals in js.items():
-                rows.append({
-                    "date": pd.to_datetime(date_str),
-                    "symbol": s,
-                    "open": float(vals["1. open"]),
-                    "high": float(vals["2. high"]),
-                    "low": float(vals["3. low"]),
-                    "close": float(vals["4. close"]),
-                    "volume": float(vals["6. volume"])
-                })
-            df = pd.DataFrame(rows).sort_values("date")
-            frames.append(df)
-        except Exception as e:
-            st.write(f"Alpha Vantage error for {s}: {e}")
-
-    if not frames:
+    if not os.path.exists(folder):
+        st.error(f"Data folder '{folder}' not found.")
         return pd.DataFrame(columns=["date","symbol","open","high","low","close","volume"])
+    
+    files = [f for f in os.listdir(folder) if f.endswith(".csv")]
+    for file in files:
+        try:
+            path = os.path.join(folder, file)
+            df = pd.read_csv(path)
+            df.columns = [c.lower() for c in df.columns]
+            if "symbol" not in df.columns:
+                df["symbol"] = file.replace(".csv", "").upper()
+            df["date"] = pd.to_datetime(df["date"])
+            frames.append(df[["date","symbol","open","high","low","close","volume"]])
+        except Exception as e:
+            st.write(f"Error loading {file}: {e}")
+    
+    if not frames:
+        st.warning("No CSV data loaded.")
+        return pd.DataFrame(columns=["date","symbol","open","high","low","close","volume"])
+    
     out = pd.concat(frames).sort_values(["symbol","date"]).reset_index(drop=True)
     return out
+
 
 
 # ---------------- STRATEGY ENGINE ----------------
@@ -149,10 +130,11 @@ with st.sidebar:
     symbols = [s.strip() for s in symbols_text.split(",") if s.strip()]
     st.markdown("---")
     if st.button("Fetch / Refresh Prices"):
-        with st.spinner("Downloading data..."):
-            hist = load_history(symbols)
+        with st.spinner("Loading local data..."):
+            hist = load_history_local("data")
         st.session_state["prices"] = hist
         st.success(f"Loaded {len(hist)} rows for {len(hist['symbol'].unique())} symbols.")
+
 
     if st.button("Generate Signals"):
         prices = st.session_state.get("prices")
