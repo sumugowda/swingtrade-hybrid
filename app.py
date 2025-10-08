@@ -50,31 +50,56 @@ def write_journal_rows(rows):
 # ---------------- DATA LOADER ----------------
 
 
+
 @st.cache_data(show_spinner=False)
 def load_history_local(folder="data"):
     frames = []
     if not os.path.exists(folder):
         st.error(f"Data folder '{folder}' not found.")
         return pd.DataFrame(columns=["date","symbol","open","high","low","close","volume"])
-    
+
     files = [f for f in os.listdir(folder) if f.endswith(".csv")]
     for file in files:
         try:
             path = os.path.join(folder, file)
             df = pd.read_csv(path)
-            df.columns = [c.lower() for c in df.columns]
-            if "symbol" not in df.columns:
-                df["symbol"] = file.replace(".csv", "").upper()
-            df["date"] = pd.to_datetime(df["date"])
-            frames.append(df[["date","symbol","open","high","low","close","volume"]])
+
+            # normalize headers
+            df.columns = [c.strip().lower() for c in df.columns]
+
+            # skip files missing essential columns
+            required = ["date", "open", "high", "low", "close", "volume"]
+            if not all(col in df.columns for col in required):
+                st.warning(f"Skipping {file}: missing one of {required}")
+                continue
+
+            # clean and type-cast
+            df["symbol"] = (
+                df["symbol"].astype(str).str.strip().str.upper()
+                if "symbol" in df.columns
+                else file.replace(".csv", "").upper()
+            )
+
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.dropna(subset=["date"])
+            df = df.sort_values("date")
+
+            # select consistent subset
+            df = df[["date", "symbol", "open", "high", "low", "close", "volume"]]
+            frames.append(df)
+
         except Exception as e:
-            st.write(f"Error loading {file}: {e}")
-    
+            st.warning(f"Error loading {file}: {e}")
+
     if not frames:
-        st.warning("No CSV data loaded.")
+        st.error("No valid data files found.")
         return pd.DataFrame(columns=["date","symbol","open","high","low","close","volume"])
-    
-    out = pd.concat(frames).sort_values(["symbol","date"]).reset_index(drop=True)
+
+    # ✅ clean column types explicitly before concat
+    out = pd.concat(frames, ignore_index=True)
+    out["symbol"] = out["symbol"].astype(str)
+    out["date"] = pd.to_datetime(out["date"])
+    out = out.sort_values(["symbol", "date"], ignore_index=True)
     return out
 
 
