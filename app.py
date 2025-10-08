@@ -51,6 +51,10 @@ def write_journal_rows(rows):
 
 
 
+import os
+import pandas as pd
+import streamlit as st
+
 @st.cache_data(show_spinner=False)
 def load_history_local(folder="data"):
     frames = []
@@ -58,34 +62,38 @@ def load_history_local(folder="data"):
         st.error(f"Data folder '{folder}' not found.")
         return pd.DataFrame(columns=["date","symbol","open","high","low","close","volume"])
 
-    files = [f for f in os.listdir(folder) if f.endswith(".csv")]
+    files = [f for f in os.listdir(folder) if f.lower().endswith(".csv")]
     for file in files:
         try:
             path = os.path.join(folder, file)
             df = pd.read_csv(path)
 
-            # normalize headers
+            # 1) normalize headers
             df.columns = [c.strip().lower() for c in df.columns]
 
-            # skip files missing essential columns
-            required = ["date", "open", "high", "low", "close", "volume"]
+            # 2) validate required columns
+            required = ["date","open","high","low","close","volume"]
             if not all(col in df.columns for col in required):
                 st.warning(f"Skipping {file}: missing one of {required}")
                 continue
 
-            # clean and type-cast
-            df["symbol"] = (
-                df["symbol"].astype(str).str.strip().str.upper()
-                if "symbol" in df.columns
-                else file.replace(".csv", "").upper()
-            )
+            # 3) symbol
+            if "symbol" in df.columns:
+                df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+            else:
+                df["symbol"] = file.rsplit(".", 1)[0].upper()
 
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            df = df.dropna(subset=["date"])
-            df = df.sort_values("date")
+            # 4) robust datetime parsing:
+            #    - accept strings with timezone (e.g., '+05:30')
+            #    - coerce invalid rows to NaT
+            #    - remove timezone (make naive) so all files match
+            d = pd.to_datetime(df["date"], utc=True, errors="coerce")
+            d = d.dt.tz_localize(None)  # drop UTC tz info → naive datetime
+            df["date"] = d
+            df = df.dropna(subset=["date"]).sort_values("date")
 
-            # select consistent subset
-            df = df[["date", "symbol", "open", "high", "low", "close", "volume"]]
+            # 5) keep consistent subset
+            df = df[["date","symbol","open","high","low","close","volume"]]
             frames.append(df)
 
         except Exception as e:
@@ -95,11 +103,10 @@ def load_history_local(folder="data"):
         st.error("No valid data files found.")
         return pd.DataFrame(columns=["date","symbol","open","high","low","close","volume"])
 
-    # ✅ clean column types explicitly before concat
+    # Concatenate WITHOUT re-parsing date again (it’s already normalized)
     out = pd.concat(frames, ignore_index=True)
     out["symbol"] = out["symbol"].astype(str)
-    out["date"] = pd.to_datetime(out["date"])
-    out = out.sort_values(["symbol", "date"], ignore_index=True)
+    out = out.sort_values(["symbol","date"], ignore_index=True)
     return out
 
 
