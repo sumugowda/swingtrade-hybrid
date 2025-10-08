@@ -152,6 +152,75 @@ def compute_signals(prices: pd.DataFrame, dist52_max=10.0,
             out_rows.append([asof, sym, "PEAD", "BUY", entry, stop, "ATRtrail_or_Time", 0.65, "Gap+VolUp continuation", "NEW"])
     return out_rows
 
+import pandas_ta as ta
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
+
+# --- Compute technical indicators and hybrid signals ---
+def compute_signals(df: pd.DataFrame):
+    out = []
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    for sym, data in df.groupby("symbol"):
+        data = data.copy().sort_values("date")
+        if len(data) < 60:
+            continue
+
+        data["ema20"] = ta.ema(data["close"], length=20)
+        data["ema50"] = ta.ema(data["close"], length=50)
+        data["rsi"] = ta.rsi(data["close"], length=14)
+
+        # PEAD proxy: recent 10-day return vs prior 10-day return
+        data["drift"] = data["close"].pct_change(10) * 100
+        latest = data.iloc[-1]
+
+        # --- Rule engine ---
+        ema_signal = "BUY" if latest["ema20"] > latest["ema50"] else "SELL"
+        drift_signal = "BUY" if latest["drift"] > 0 else "SELL"
+        rsi_signal = "BUY" if latest["rsi"] > 55 else ("SELL" if latest["rsi"] < 45 else "HOLD")
+
+        # Weighted consensus
+        signals = [ema_signal, drift_signal, rsi_signal]
+        action = max(set(signals), key=signals.count)
+        confidence = round(sum([s == action for s in signals]) / len(signals), 2)
+
+        note = f"EMA20 {ema_signal}, Drift {drift_signal}, RSI {rsi_signal}"
+        entry = round(float(latest['close']), 2)
+        stop = round(entry * (0.97 if action == "BUY" else 1.03), 2)
+        target = round(entry * (1.03 if action == "BUY" else 0.97), 2)
+
+        out.append({
+            "asof": today,
+            "symbol": sym,
+            "strategy": "Momentum+PEAD",
+            "action": action,
+            "entry": entry,
+            "stop": stop,
+            "target": target,
+            "confidence": confidence,
+            "notes": note,
+            "status": "Active"
+        })
+    return pd.DataFrame(out)
+
+
+# --- Export to Google Sheets ---
+def export_to_sheets(df: pd.DataFrame, sheet_name="Swing_Trader_Signals", tab="signals"):
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
+        client = gspread.authorize(creds)
+
+        ws = client.open(sheet_name).worksheet(tab)
+        ws.clear()
+
+        ws.append_row(list(df.columns))
+        ws.append_rows(df.values.tolist())
+        st.success(f"✅ Exported {len(df)} signals to Google Sheet → '{sheet_name}' / '{tab}'")
+    except Exception as e:
+        st.error(f"❌ Failed to export to Google Sheets: {e}")
+
 # ---------------- UI ----------------
 st.set_page_config(page_title="SwingTrade Hybrid", layout="wide")
 st.title("SwingTrade — Hybrid (Momentum + PEAD)")
@@ -167,7 +236,6 @@ with st.sidebar:
         st.session_state["prices"] = hist
         st.success(f"Loaded {len(hist)} rows for {len(hist['symbol'].unique())} symbols.")
 
-
     if st.button("Generate Signals"):
         prices = st.session_state.get("prices")
         if prices is None or prices.empty:
@@ -179,6 +247,18 @@ with st.sidebar:
                 st.success(f"Wrote {len(rows)} signals to Google Sheet → 'signals' tab.")
             else:
                 st.info("No fresh signals today.")
+    if st.button("📤 Generate & Export Signals"):
+        prices = st.session_state.get("prices")
+        if prices is None or prices.empty:
+            st.warning("No price data loaded yet.")
+        else:
+            with st.spinner("Computing hybrid signals..."):
+                sig_df = compute_signals(prices)
+                if sig_df.empty:
+                    st.warning("No signals computed — check data.")
+                else:
+                    st.dataframe(sig_df.head(10))
+                    export_to_sheets(sig_df)
 
 # Chart
 prices = st.session_state.get("prices")
