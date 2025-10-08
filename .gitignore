@@ -1,0 +1,24 @@
+    # Ignore virtual environments
+venv/
+.env/
+env/
+hybrid_trader/
+__pycache__/
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore Python cache
+*.pyc
+*.pyo
+test.py
+
+# Ignore credentials
+service_account.json
+service_account.toml
+
+# Ignore IDE/project configs
+.vscode/
+.idea/
+*.log

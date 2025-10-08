@@ -5,6 +5,8 @@ import pandas_ta as ta
 import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
+import requests
+
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -46,26 +48,55 @@ def write_journal_rows(rows):
     ws.append_rows(rows, value_input_option="USER_ENTERED")
 
 # ---------------- DATA LOADER ----------------
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_history_yf(symbols, start="2000-01-01"):
-    frames = []
-    for s in symbols:
-        y = to_yahoo(s)
-        try:
-            st.write(f"Fetching {y}") #
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_history(symbols, start="2015-01-01"):
+    """Fetch OHLCV from Yahoo; fall back to Alpha Vantage if Yahoo fails."""
+    frames = []
+    alpha_key = st.secrets["alphavantage"]["api_key"]
+
+    for s in symbols:
+        y = f"{s}.NS"
+        st.write(f"Fetching {y}")
+        try:
             df = yf.download(y, start=start, progress=False, auto_adjust=False)
-            if df.empty:
-                continue
-            df = df.rename(columns=str.lower).reset_index()
-            df["symbol"] = s
-            frames.append(df[["date","symbol","open","high","low","close","volume"]])
+            if not df.empty:
+                df = df.rename(columns=str.lower).reset_index()
+                df["symbol"] = s
+                frames.append(df[["date","symbol","open","high","low","close","volume"]])
+                continue  # Yahoo worked
         except Exception:
-            continue
+            pass
+
+        # Yahoo failed — try Alpha Vantage (daily adjusted)
+        st.write(f"Yahoo failed for {s}, trying Alpha Vantage…")
+        try:
+            url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={s}.BSE&apikey={alpha_key}&outputsize=compact"
+            r = requests.get(url, timeout=15)
+            js = r.json().get("Time Series (Daily)", {})
+            if not js:
+                continue
+            rows = []
+            for date_str, vals in js.items():
+                rows.append({
+                    "date": pd.to_datetime(date_str),
+                    "symbol": s,
+                    "open": float(vals["1. open"]),
+                    "high": float(vals["2. high"]),
+                    "low": float(vals["3. low"]),
+                    "close": float(vals["4. close"]),
+                    "volume": float(vals["6. volume"])
+                })
+            df = pd.DataFrame(rows).sort_values("date")
+            frames.append(df)
+        except Exception as e:
+            st.write(f"Alpha Vantage error for {s}: {e}")
+
     if not frames:
         return pd.DataFrame(columns=["date","symbol","open","high","low","close","volume"])
     out = pd.concat(frames).sort_values(["symbol","date"]).reset_index(drop=True)
     return out
+
 
 # ---------------- STRATEGY ENGINE ----------------
 def compute_signals(prices: pd.DataFrame, dist52_max=10.0,
@@ -119,7 +150,7 @@ with st.sidebar:
     st.markdown("---")
     if st.button("Fetch / Refresh Prices"):
         with st.spinner("Downloading data..."):
-            hist = load_history_yf(symbols)
+            hist = load_history(symbols)
         st.session_state["prices"] = hist
         st.success(f"Loaded {len(hist)} rows for {len(hist['symbol'].unique())} symbols.")
 
